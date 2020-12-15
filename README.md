@@ -6,6 +6,10 @@ Just put a "doing" file in this directory and add a call to cron
 ```
 	* * * * * ~path to this file~/cron.rb >/dev/null
 ```
+Install gems:
+```
+gem install pp json time gli
+```
 To display:
 ```
 ze read log* |ze view

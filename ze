@@ -1,0 +1,220 @@
+#!/usr/bin/env ruby
+
+require 'pp'
+require 'json'
+require 'gli'
+require 'time'
+
+Dir.chdir File.dirname(__FILE__)
+
+def same_prefix(a,b)
+  max=0
+  1.upto([a.length,b.length]-1){|i|
+    max=i if a[0...i]=b[0...i] 
+  }
+  max
+end
+
+
+def show(name,delta,ts=nil, used=nil)
+  h = (delta).to_i
+  m = ((delta*60).to_i)%60
+  result =""
+  if name.length>30
+    result += sprintf "\n%s %s\n "+(" "*33),(used ? "X":" "),name
+  else
+    result += sprintf "%s %30s: ",(used ? "X":" "),name
+  end
+  result += sprintf "%02.3f  %02d:%02d %02dh %02dm     %s",delta,h,m,h,m,ts
+  result
+end
+
+def read_txt(filenames)
+  result =[]
+
+  time = Time.new
+  month="%4d%02d" % [time.year,time.month]
+  filenames=Dir["log_#{month}*.txt"] if filenames.empty?
+
+  filenames.each{|filename|
+    lines = File.open(filename){|f|f.readlines}
+    if filename =~/log_([0-9]{4})([0-9]{2})([0-9]{2}).*\.txt/
+      y,m,d=*$~[1..-1]
+    else
+      STDERR.puts "invalid filename #{filename}"
+    end
+    prev=nil
+    lines.each{|line|
+      if line=~/([0-9][0-9]):([0-9][0-9]) *(.*)/
+        h,mi,r = $~[1..-1]
+        ts = Time.new(y,m,d,h,mi)
+
+        if prev
+          delta = (ts.to_i-prev[0].to_i)/3600.0
+          name = prev[1]
+          #            used = (! (name =~/.*(pause|stop|mittag).*/i))
+          result << {'name'=>name, 'delta'=>delta, 'ts'=>ts.to_s, 'filenames'=>[filename]}
+        end
+        prev=[ts,r]
+      end
+    }
+  }
+  result
+end
+
+def read_json
+  JSON.parse(STDIN.read)
+end
+
+def pretty_output(data)
+  JSON.dump(data.map{|e|e.to_h})
+end
+
+def filter(data, regex, invert)
+  data.select{|line|
+    !!(line['name']=~regex) ^ invert
+  }
+end
+
+def to_table(data)
+  data.map{|line|
+    ts = line['ts']
+    delta = "%02.3f" % line['delta']
+    delta_hm = "%02dh %02dm" % [delta.to_i, ((delta.to_f*60).to_i)%60]
+    name = line['name']
+
+    [ts,delta,delta_hm,name]
+  }
+end
+
+def view_csv(data)
+  to_table(data).map do |line|
+    "\""+line.map{|col|col.sub(/ 00:00:00\s.*/,'').sub(".",",")}.join("\",\"")+"\""
+  end.join("\n")
+end
+def view(data)
+  to_table(data).map{|line|line.join("\t")}.join("\n")
+end
+
+def filter_pause(data)
+  filter(data, /.*(pause|stop|mittag).*/i, true)
+end
+
+def group(data)
+  data
+    .sort_by{|line| line['ts'] }
+    .group_by{|line| yield line }
+    .map do |k,group| 
+    {
+      'name'=> group.map{|entry|entry['name']}.uniq.join(", "), 
+      'delta'=> group.map{|entry|entry['delta']}.sum, 
+      'ts'=> Time.parse(k).to_s
+    }
+  end
+  
+end
+def group_date(data)
+  group(data) {|line| line['ts'].sub(/ .*/,'') }
+end
+
+class App
+  extend GLI::App
+
+  program_desc 'A simple time logging service'
+
+  desc 'get packages from class-names'
+  command :read do |c|
+    #c.flag [:s, :separator], :default_value => '.', :desc => 'separator for packages and classes'
+    c.action do |global_options, options, args|
+      puts pretty_output(read_txt(args))
+    end
+  end
+
+  desc 'filter'
+  command :grep do |c|
+    c.switch [:v, 'invert-match'.to_sym]
+    c.switch [:i, 'ignore-case'.to_sym]
+    c.action do |global_options, options, args|
+      puts pretty_output(filter(read_json,Regexp.new(args[0], !!options['i']), options['v']))
+    end
+  end
+
+  desc 'pause'
+  command :pause do |c|
+    c.action do |global_options, options, args|
+      puts pretty_output(filter_pause(read_json))
+    end
+  end
+
+  desc 'view'
+  command :view do |c|
+    c.action do |global_options, options, args|
+      puts view(read_json)
+    end
+  end
+
+  desc 'group'
+  command :group do |c|
+    c.action do |global_options, options, args|
+      puts pretty_output(group_date(read_json))
+    end
+  end
+
+  desc 'sum'
+  command :sum do |c|
+    c.action do |global_options, options, args|
+        puts pretty_output(group(read_json) {|line| line['ts'].sub(/-.*/,'')+"-01-01"})
+    end
+  end
+
+
+  desc 'run'
+  command :run do |c|
+    c.action do |global_options, options, args|
+      begin
+      cur=nil
+      args[0].split("|").each do |cmd|
+        cmd,*args = cmd.split(" ")
+        case cmd
+        when "read"
+          cur = read_txt(args.map{|arg|Dir[arg]}.flatten)
+        when "group"
+          cur = group_date(cur)
+        when "sum"
+          cur = group(cur) {|line| line['ts'].sub(/-.*/,'')+"-01-01"}
+        when "view_csv"
+          puts view_csv(cur)
+        when "view"
+          puts view(cur)
+        when "pause"
+          cur = filter_pause(cur)
+        when "grep"
+          inverted = false
+          str = nil
+          args.each do |arg|
+            case arg
+            when '-v'
+              inverted = true
+            else
+              if str.nil?
+                str= arg
+              else
+                raise "Invalid grep"
+              end
+            end
+          end
+          cur = filter(cur,/#{str}/i, inverted)
+        else
+          raise "Unknown command #{cmd} #{args}"
+        end
+#        p cmd,args,cur
+      end
+      rescue Exception => e
+        pp e, e.backtrace
+      end
+    end
+  end
+
+
+end
+exit App.run(ARGV)
